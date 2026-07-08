@@ -785,7 +785,10 @@ function toggleDrilldownRow(tr, depot, part) {
 
   const weather = state.weatherByDepot[depot.ccdesc] || {};
   const rainSeries = state.months.map(ym => (weather[ym] ? weather[ym].rain : null));
+  const tempSeries = state.months.map(ym => (weather[ym] ? weather[ym].meanTemp : null));
+  const frostSeries = state.months.map(ym => (weather[ym] ? weather[ym].frostDays : null));
   const hasWeather = rainSeries.some(v => v !== null);
+  const hasTemp = tempSeries.some(v => v !== null && v !== undefined);
 
   const datasets = [
     { label: "Mean +1σ", data: upperBand, borderColor: "transparent", backgroundColor: "rgba(229,0,125,0.10)", fill: "+1", pointRadius: 0 },
@@ -794,7 +797,14 @@ function toggleDrilldownRow(tr, depot, part) {
     { label: "Monthly usage", data: qtySeries, borderColor: "#2D2A6E", backgroundColor: "#2D2A6E", pointRadius: 3, borderWidth: 2, tension: 0.2 },
   ];
   if (hasWeather) {
-    datasets.push({ label: "Rainfall (mm)", data: rainSeries, type: "bar", backgroundColor: "rgba(52,152,219,0.35)", yAxisID: "y1" });
+    datasets.push({ label: "Rainfall (mm)", data: rainSeries, type: "bar", backgroundColor: "rgba(52,152,219,0.35)", yAxisID: "y1", order: 3 });
+  }
+  if (hasTemp) {
+    datasets.push({
+      label: "Avg daily high (°C)", data: tempSeries, type: "line", yAxisID: "y2",
+      borderColor: "#e67e22", backgroundColor: "#e67e22", pointRadius: 2, borderWidth: 2,
+      tension: 0.3, borderDash: [2, 2], order: 2,
+    });
   }
 
   makeOrUpdateChart(canvasId, {
@@ -802,11 +812,25 @@ function toggleDrilldownRow(tr, depot, part) {
     data: { labels: state.months.map(monthLabel), datasets },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 10 } } } },
+      plugins: {
+        legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 10 } } },
+        tooltip: {
+          callbacks: {
+            afterBody: (items) => {
+              const idx = items[0]?.dataIndex;
+              const frost = frostSeries[idx];
+              return frost ? [`Frost days: ${frost}`] : [];
+            },
+          },
+        },
+      },
       scales: {
         y: { beginAtZero: true, title: { display: true, text: "Qty issued" } },
         y1: hasWeather
           ? { position: "right", beginAtZero: true, grid: { drawOnChartArea: false }, title: { display: true, text: "Rainfall (mm)" } }
+          : { display: false },
+        y2: hasTemp
+          ? { position: "right", grid: { drawOnChartArea: false }, title: { display: true, text: "Avg daily high (°C)" }, offset: true }
           : { display: false },
       },
     },
