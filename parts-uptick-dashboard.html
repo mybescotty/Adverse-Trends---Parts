@@ -70,6 +70,19 @@ header input[type="range"] { width: 110px; }
 .toggle-btn:hover  { background: rgba(255,255,255,0.12); }
 .toggle-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+/* Same toggle, but for use on white panels instead of the dark header */
+.toggle-btn-light {
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.toggle-btn-light:hover  { background: rgba(229,0,125,0.08); }
+.toggle-btn-light.active { background: var(--accent); color: #fff; }
+
 .action-btn {
   background: #27ae60;
   color: #fff;
@@ -213,7 +226,13 @@ main { padding: 18px 22px 60px; max-width: 1400px; margin: 0 auto; }
 
     <div class="panel">
       <h2>Depots ranked by biggest swing</h2>
-      <div class="sub">Sorted by each depot's single largest anomaly (z-score). Click a depot to drill in.</div>
+      <div class="sub" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+        <span>Click a depot to drill in.</span>
+        <span>Sort by:
+          <button class="toggle-btn-light active" id="depotSortZBtn">Z-score</button>
+          <button class="toggle-btn-light" id="depotSortCostBtn">£ impact</button>
+        </span>
+      </div>
       <div class="depot-grid" id="depotGrid"></div>
     </div>
   </div>
@@ -233,7 +252,13 @@ main { padding: 18px 22px 60px; max-width: 1400px; margin: 0 auto; }
 
     <div class="panel">
       <h2 id="drilldownPartsTitle">Parts ranked by anomaly</h2>
-      <div class="sub">Click a row to see the monthly trend, mean band, and weather overlay.</div>
+      <div class="sub" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+        <span>Click a row to see the monthly trend, mean band, and weather overlay.</span>
+        <span>Sort by:
+          <button class="toggle-btn-light active" id="partsSortZBtn">Z-score</button>
+          <button class="toggle-btn-light" id="partsSortCostBtn">£ impact</button>
+        </span>
+      </div>
       <table class="wo-table" id="partsTable">
         <thead>
           <tr>
@@ -242,6 +267,7 @@ main { padding: 18px 22px 60px; max-width: 1400px; margin: 0 auto; }
             <th>Latest month qty</th>
             <th>Historical mean</th>
             <th>Z-score</th>
+            <th>£ impact</th>
             <th>Status</th>
           </tr>
         </thead>
@@ -268,6 +294,8 @@ const state = {
   weatherByDepot: {},  // ccKey -> { "YYYY-MM": { rain, frostDays, meanTemp } }
   weatherStatus: {},   // ccKey -> { status: 'pending'|'ok'|'no-location'|'geocode-error'|'fetch-error', detail, location }
   currentDepotKey: null,
+  depotSortMode: "z",  // 'z' | 'cost'
+  partsSortMode: "z",  // 'z' | 'cost'
 };
 
 function monthKey(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); }
@@ -336,13 +364,15 @@ function rebuildDepots() {
         ccdesc,
         costCentre: (r.CostCentre || "").trim(),
         opco: (r.OPCODesc || "").trim(),
-        parts: {},   // partCode -> { desc, mtlGroup, mtlGroupDesc, monthly: {ym: qty} }
-        mtlGroups: {}, // mtlGroupDesc -> { monthly: {ym: qty} }
+        parts: {},   // partCode -> { desc, mtlGroup, mtlGroupDesc, monthly: {ym: qty}, valueMonthly: {ym: £}, fleetMonthly: {ym: {fleet: qty}} }
+        mtlGroups: {}, // mtlGroupDesc -> { monthly: {ym: qty}, valueMonthly: {ym: £} }
       };
     }
     const depot = depots[ccdesc];
     const partCode = (r.Part || "").trim();
     const qty = parseFloat(r.TransactionQty) || 0;
+    const value = parseFloat(r.TransactionValue) || 0;
+    const fleet = (r.FleetNumber || "").trim() || "Unknown";
     const mtlGroupDesc = (r.MtlGroupDesc || "").trim() || "Uncategorised";
 
     if (partCode) {
@@ -351,14 +381,20 @@ function rebuildDepots() {
           desc: (r.PartDesc || "").trim() || partCode,
           mtlGroupDesc,
           monthly: {},
+          valueMonthly: {},
+          fleetMonthly: {},
         };
       }
       const p = depot.parts[partCode];
       p.monthly[ym] = (p.monthly[ym] || 0) + qty;
+      p.valueMonthly[ym] = (p.valueMonthly[ym] || 0) + value;
+      if (!p.fleetMonthly[ym]) p.fleetMonthly[ym] = {};
+      p.fleetMonthly[ym][fleet] = (p.fleetMonthly[ym][fleet] || 0) + qty;
     }
 
-    if (!depot.mtlGroups[mtlGroupDesc]) depot.mtlGroups[mtlGroupDesc] = { monthly: {} };
+    if (!depot.mtlGroups[mtlGroupDesc]) depot.mtlGroups[mtlGroupDesc] = { monthly: {}, valueMonthly: {} };
     depot.mtlGroups[mtlGroupDesc].monthly[ym] = (depot.mtlGroups[mtlGroupDesc].monthly[ym] || 0) + qty;
+    depot.mtlGroups[mtlGroupDesc].valueMonthly[ym] = (depot.mtlGroups[mtlGroupDesc].valueMonthly[ym] || 0) + value;
   });
 
   state.months = Array.from(monthSet).sort();
@@ -403,32 +439,59 @@ function computeZ(seriesVals) {
   return { z, mean, std, latest, insufficient: false };
 }
 
+// Cost impact: latest month's £ value vs. the historical mean, same history-excludes-latest
+// convention as computeZ but without needing a std-dev (this is a £ magnitude, not a significance test).
+function computeCostImpact(seriesVals) {
+  if (seriesVals.length < 2) return { latestValue: seriesVals[0] || 0, meanValue: null, excessValue: null };
+  const latestValue = seriesVals[seriesVals.length - 1];
+  const history = seriesVals.slice(0, -1);
+  const meanValue = history.reduce((a, b) => a + b, 0) / history.length;
+  return { latestValue, meanValue, excessValue: latestValue - meanValue };
+}
+
 function computeAllAnomalies() {
   Object.values(state.depots).forEach(depot => {
     Object.entries(depot.parts).forEach(([partCode, p]) => {
       p.stats = computeZ(seriesArray(p.monthly));
+      p.costStats = computeCostImpact(seriesArray(p.valueMonthly));
     });
     Object.entries(depot.mtlGroups).forEach(([name, g]) => {
       g.stats = computeZ(seriesArray(g.monthly));
+      g.costStats = computeCostImpact(seriesArray(g.valueMonthly));
     });
   });
 }
 
-function flaggedParts(depot) {
+function rankKey(item, sortMode) {
+  if (sortMode === "cost") return item.costStats ? item.costStats.excessValue : -Infinity;
+  return (item.stats && !item.stats.insufficient) ? item.stats.z : -Infinity;
+}
+
+function flaggedParts(depot, sortMode = "z") {
   return Object.entries(depot.parts)
     .map(([code, p]) => ({ code, ...p }))
     .filter(p => p.stats && !p.stats.insufficient && p.stats.z >= state.zThreshold)
-    .sort((a, b) => b.stats.z - a.stats.z);
+    .sort((a, b) => rankKey(b, sortMode) - rankKey(a, sortMode));
 }
 
-function allPartsRanked(depot) {
+function allPartsRanked(depot, sortMode = "z") {
   return Object.entries(depot.parts)
     .map(([code, p]) => ({ code, ...p }))
-    .sort((a, b) => {
-      const za = (a.stats && !a.stats.insufficient) ? a.stats.z : -Infinity;
-      const zb = (b.stats && !b.stats.insufficient) ? b.stats.z : -Infinity;
-      return zb - za;
-    });
+    .sort((a, b) => rankKey(b, sortMode) - rankKey(a, sortMode));
+}
+
+// Fleet breakdown for a part's latest (i.e. currently-evaluated) month.
+function fleetBreakdownForMonth(part) {
+  const ym = state.months[state.months.length - 1];
+  const byFleet = (part.fleetMonthly && part.fleetMonthly[ym]) || {};
+  const entries = Object.entries(byFleet)
+    .map(([fleet, qty]) => ({ fleet, qty }))
+    .filter(e => e.qty > 0)
+    .sort((a, b) => b.qty - a.qty);
+  const totalQty = entries.reduce((a, e) => a + e.qty, 0);
+  const distinctFleets = entries.length;
+  const topShare = totalQty > 0 && entries.length ? entries[0].qty / totalQty : 0;
+  return { entries, totalQty, distinctFleets, topShare, ym };
 }
 
 /* ---------- 5. Weather (postcodes.io geocoding + Open-Meteo history) ---------- */
@@ -546,6 +609,9 @@ function escapeHtml(str) {
 }
 function cssSafe(str) { return String(str).replace(/[^a-zA-Z0-9_-]/g, "_"); }
 
+const gbpFormatter = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 });
+function formatGBP(value) { return gbpFormatter.format(value); }
+
 function updateStatus() {
   const statusGroup = document.getElementById("statusGroup");
   const depotCount = Object.keys(state.depots).length;
@@ -620,20 +686,27 @@ function renderDepotGrid() {
   const grid = document.getElementById("depotGrid");
   grid.innerHTML = "";
 
+  const mode = state.depotSortMode;
   const depotList = Object.values(state.depots).map(d => {
-    const flagged = flaggedParts(d);
-    const topZ = flagged.length ? flagged[0].stats.z : -Infinity;
-    return { depot: d, flagged, topZ };
+    const flagged = flaggedParts(d, mode);
+    const topKey = flagged.length ? rankKey(flagged[0], mode) : -Infinity;
+    return { depot: d, flagged, topKey };
   });
-  depotList.sort((a, b) => b.topZ - a.topZ);
+  depotList.sort((a, b) => b.topKey - a.topKey);
 
+  const swingLabel = mode === "cost" ? "£ impact" : "z-score";
   depotList.forEach((entry, idx) => {
     const { depot, flagged } = entry;
     const card = document.createElement("div");
     card.className = "depot-card" + (flagged.length === 0 ? " no-flags" : "");
-    const rankLabel = flagged.length ? `#${idx + 1} biggest swing` : "No anomalies flagged";
+    const rankLabel = flagged.length ? `#${idx + 1} biggest ${swingLabel}` : "No anomalies flagged";
+    const topStatHtml = flagged.length
+      ? (mode === "cost"
+          ? `<span class="z">${formatGBP(flagged[0].costStats.excessValue)}</span>`
+          : `<span class="z">z=${flagged[0].stats.z.toFixed(1)}</span>`)
+      : "";
     const topPartHtml = flagged.length
-      ? `<div class="top-part">${escapeHtml(flagged[0].desc)} <span class="z">z=${flagged[0].stats.z.toFixed(1)}</span></div>`
+      ? `<div class="top-part">${escapeHtml(flagged[0].desc)} ${topStatHtml}</div>`
       : `<div class="top-part" style="color:var(--text-secondary)">Usage within normal range</div>`;
     const canvasId = `spark-${cssSafe(depot.ccdesc)}`;
     card.innerHTML = `
@@ -728,7 +801,7 @@ function renderWeatherDepotPanel(ccdesc) {
 function renderPartsTable(depot) {
   const tbody = document.getElementById("partsTableBody");
   tbody.innerHTML = "";
-  const parts = allPartsRanked(depot);
+  const parts = allPartsRanked(depot, state.partsSortMode);
 
   parts.forEach(p => {
     const tr = document.createElement("tr");
@@ -747,12 +820,22 @@ function renderPartsTable(depot) {
       meanCell = stats.mean.toFixed(1);
     }
     const latest = stats ? stats.latest : 0;
+
+    const cost = p.costStats;
+    let costCell = "&mdash;";
+    if (cost && cost.excessValue !== null) {
+      const sign = cost.excessValue > 0 ? "+" : "";
+      const cls = cost.excessValue > 0 ? "z-strong" : "";
+      costCell = `<span class="${cls}">${sign}${formatGBP(cost.excessValue)}</span>`;
+    }
+
     tr.innerHTML = `
       <td>${escapeHtml(p.code)}</td>
       <td>${escapeHtml(p.desc)}</td>
       <td>${latest}</td>
       <td>${meanCell}</td>
       <td>${zCell}</td>
+      <td>${costCell}</td>
       <td>${statusBadge}</td>
     `;
     tr.addEventListener("click", () => toggleDrilldownRow(tr, depot, p));
@@ -774,7 +857,7 @@ function toggleDrilldownRow(tr, depot, part) {
   const row = document.createElement("tr");
   row.className = "drilldown-row";
   const canvasId = `chart-${cssSafe(depot.ccdesc)}-${cssSafe(part.code)}`;
-  row.innerHTML = `<td colspan="6"><div class="drilldown-inner"><div class="chart-wrap"><canvas id="${canvasId}"></canvas></div></div></td>`;
+  row.innerHTML = `<td colspan="7"><div class="drilldown-inner"><div class="chart-wrap"><canvas id="${canvasId}"></canvas></div><div id="fleetBreakdown-${cssSafe(depot.ccdesc)}-${cssSafe(part.code)}"></div></div></td>`;
   tr.after(row);
 
   const qtySeries = seriesArray(part.monthly);
@@ -835,6 +918,41 @@ function toggleDrilldownRow(tr, depot, part) {
       },
     },
   });
+
+  renderFleetBreakdown(depot, part);
+}
+
+function renderFleetBreakdown(depot, part) {
+  const container = document.getElementById(`fleetBreakdown-${cssSafe(depot.ccdesc)}-${cssSafe(part.code)}`);
+  if (!container) return;
+  const { entries, totalQty, distinctFleets, topShare, ym } = fleetBreakdownForMonth(part);
+
+  if (entries.length === 0) {
+    container.innerHTML = '<div class="spinner-note" style="margin-top:10px;">No fleet number recorded against this part in its latest month.</div>';
+    return;
+  }
+
+  const top5 = entries.slice(0, 5);
+  const otherCount = entries.length - top5.length;
+  const otherQty = entries.slice(5).reduce((a, e) => a + e.qty, 0);
+
+  const chips = top5.map(e => `<div class="mtl-chip">${escapeHtml(e.fleet)} <span class="z">${e.qty}</span></div>`).join("");
+  const otherChip = otherCount > 0 ? `<div class="mtl-chip">+${otherCount} other vehicle(s) <span class="z">${otherQty}</span></div>` : "";
+
+  const verdict = distinctFleets === 1
+    ? `All ${totalQty} unit(s) this month went to a single vehicle (${entries[0].fleet}) — worth inspecting that vehicle specifically.`
+    : topShare > 0.4
+      ? `Concentrated: ${entries[0].fleet} alone accounts for ${entries[0].qty} of ${totalQty} (${Math.round(topShare * 100)}%) — worth inspecting that vehicle.`
+      : `Spread across ${distinctFleets} different vehicles — looks systemic (e.g. a batch of parts), not one vehicle.`;
+
+  container.innerHTML = `
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+      <div style="font-size:12px;font-weight:600;color:var(--text-primary);margin-bottom:6px;">
+        Fleet breakdown — ${monthLabel(ym)} (${distinctFleets} vehicle${distinctFleets === 1 ? "" : "s"})
+      </div>
+      <div class="mtl-summary">${chips}${otherChip}</div>
+      <div class="sub" style="margin:8px 0 0;">${verdict}</div>
+    </div>`;
 }
 
 /* ---------- 9. Global controls & init ---------- */
@@ -851,6 +969,32 @@ document.getElementById("backToDepots").addEventListener("click", () => {
   document.getElementById("drilldownView").style.display = "none";
   document.getElementById("dashboardView").style.display = "block";
   state.currentDepotKey = null;
+});
+
+function setSortToggle(mode, zBtnId, costBtnId) {
+  document.getElementById(zBtnId).classList.toggle("active", mode === "z");
+  document.getElementById(costBtnId).classList.toggle("active", mode === "cost");
+}
+
+document.getElementById("depotSortZBtn").addEventListener("click", () => {
+  state.depotSortMode = "z";
+  setSortToggle("z", "depotSortZBtn", "depotSortCostBtn");
+  renderDepotGrid();
+});
+document.getElementById("depotSortCostBtn").addEventListener("click", () => {
+  state.depotSortMode = "cost";
+  setSortToggle("cost", "depotSortZBtn", "depotSortCostBtn");
+  renderDepotGrid();
+});
+document.getElementById("partsSortZBtn").addEventListener("click", () => {
+  state.partsSortMode = "z";
+  setSortToggle("z", "partsSortZBtn", "partsSortCostBtn");
+  if (state.currentDepotKey) renderPartsTable(state.depots[state.currentDepotKey]);
+});
+document.getElementById("partsSortCostBtn").addEventListener("click", () => {
+  state.partsSortMode = "cost";
+  setSortToggle("cost", "partsSortZBtn", "partsSortCostBtn");
+  if (state.currentDepotKey) renderPartsTable(state.depots[state.currentDepotKey]);
 });
 </script>
 </body>
