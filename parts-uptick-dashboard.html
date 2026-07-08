@@ -206,7 +206,10 @@ main { padding: 18px 22px 60px; max-width: 1400px; margin: 0 auto; }
   </div>
 
   <div id="dashboardView" style="display:none;">
-    <div class="panel" id="warningPanel" style="display:none;"></div>
+    <div class="panel" id="weatherCoveragePanel">
+      <h2>Weather coverage</h2>
+      <div id="weatherCoverageBody"></div>
+    </div>
 
     <div class="panel">
       <h2>Depots ranked by biggest swing</h2>
@@ -217,6 +220,11 @@ main { padding: 18px 22px 60px; max-width: 1400px; margin: 0 auto; }
 
   <div id="drilldownView" style="display:none;">
     <div class="breadcrumb"><a id="backToDepots">&larr; All depots</a> / <span id="drilldownDepotName"></span></div>
+
+    <div class="panel" id="weatherDepotPanel">
+      <h2>Weather</h2>
+      <div id="weatherDepotBody"></div>
+    </div>
 
     <div class="panel" id="mtlPanel">
       <h2>Category-level swings (MtlGroup)</h2>
@@ -244,9 +252,10 @@ main { padding: 18px 22px 60px; max-width: 1400px; margin: 0 auto; }
 </main>
 <script>
 /* ---------- 1. Config ---------- */
-const DEPOT_COORDS = {
-  "Olive Grove ENG": { lat: 53.3617, lon: -1.4557 },   // Sheffield
-  "Blantyre ENG":    { lat: 55.8000, lon: -4.0833 },   // Blantyre / Glasgow
+// Depots named after roads/areas (not towns) need a real postcode to geocode correctly.
+const DEPOT_LOCATIONS = {
+  "Olive Grove ENG": { postcode: "S2 3GA" },           // Sheffield — confirmed by user
+  "Blantyre ENG":    { lat: 55.8000, lon: -4.0833 },   // Blantyre, near Glasgow (town-name approximation)
 };
 
 const state = {
@@ -257,7 +266,7 @@ const state = {
   depots: {},          // ccKey -> { ccdesc, costCentre, opco, series: { partKey: {...} }, mtlSeries: {...} }
   months: [],          // sorted array of "YYYY-MM" strings across whole dataset
   weatherByDepot: {},  // ccKey -> { "YYYY-MM": { rain, frostDays, meanTemp } }
-  weatherWarning: false,
+  weatherStatus: {},   // ccKey -> { status: 'pending'|'ok'|'no-location'|'geocode-error'|'fetch-error', detail, location }
   currentDepotKey: null,
 };
 
@@ -354,15 +363,21 @@ function rebuildDepots() {
 
   state.months = Array.from(monthSet).sort();
   state.depots = depots;
+  Object.keys(depots).forEach(name => {
+    if (!state.weatherStatus[name]) state.weatherStatus[name] = { status: "pending", detail: "Checking…" };
+  });
 
   computeAllAnomalies();
-  fetchWeatherForAllDepots().finally(() => {
-    renderDepotGrid();
-    if (state.currentDepotKey && state.depots[state.currentDepotKey]) renderDrilldown(state.currentDepotKey);
-  });
-  renderDepotGrid();
   document.getElementById("emptyState").style.display = "none";
   document.getElementById("dashboardView").style.display = "block";
+  renderDepotGrid();
+  renderWeatherCoveragePanel();
+
+  fetchWeatherForAllDepots().finally(() => {
+    renderDepotGrid();
+    renderWeatherCoveragePanel();
+    if (state.currentDepotKey && state.depots[state.currentDepotKey]) renderDrilldown(state.currentDepotKey);
+  });
 }
 
 /* ---------- 4. Anomaly detection (z-score) ---------- */
@@ -416,9 +431,40 @@ function allPartsRanked(depot) {
     });
 }
 
-/* ---------- 5. Weather (Open-Meteo) ---------- */
+/* ---------- 5. Weather (postcodes.io geocoding + Open-Meteo history) ---------- */
+async function resolvePostcode(postcode) {
+  const cacheKey = `postcodeCoords:${postcode.trim().toUpperCase()}`;
+  const cached = localStorage.getItem(cacheKey);
+  if (cached) { try { return JSON.parse(cached); } catch (e) { /* ignore bad cache */ } }
+  const resp = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(postcode.trim())}`);
+  if (!resp.ok) throw new Error(`Postcode lookup failed for "${postcode}" (HTTP ${resp.status})`);
+  const json = await resp.json();
+  if (!json.result || typeof json.result.latitude !== "number") throw new Error(`Postcode "${postcode}" not recognised`);
+  const coords = { lat: json.result.latitude, lon: json.result.longitude };
+  localStorage.setItem(cacheKey, JSON.stringify(coords));
+  return coords;
+}
+
+function depotPostcodeOverride(ccdesc) {
+  return localStorage.getItem(`depotPostcode:${ccdesc}`) || null;
+}
+
+async function getDepotLocation(ccdesc) {
+  const overridePostcode = depotPostcodeOverride(ccdesc);
+  const entry = overridePostcode ? { postcode: overridePostcode } : DEPOT_LOCATIONS[ccdesc];
+  if (!entry) return null;
+  if (entry.postcode) {
+    const coords = await resolvePostcode(entry.postcode);
+    return { lat: coords.lat, lon: coords.lon, postcode: entry.postcode.toUpperCase() };
+  }
+  return { lat: entry.lat, lon: entry.lon, postcode: null };
+}
+
+function setDepotPostcode(ccdesc, postcode) {
+  localStorage.setItem(`depotPostcode:${ccdesc}`, postcode.trim().toUpperCase());
+}
+
 async function fetchWeatherForAllDepots() {
-  state.weatherWarning = false;
   const depotEntries = Object.values(state.depots);
   if (state.months.length === 0) return;
   const [sy, sm] = state.months[0].split("-").map(Number);
@@ -428,16 +474,27 @@ async function fetchWeatherForAllDepots() {
   const endDate = `${ey}-${String(em).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
 
   await Promise.all(depotEntries.map(async depot => {
-    const coords = getDepotCoords(depot.ccdesc);
-    if (!coords) { state.weatherWarning = true; return; }
+    const ccdesc = depot.ccdesc;
+    let location;
     try {
-      const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${coords.lat}&longitude=${coords.lon}` +
+      location = await getDepotLocation(ccdesc);
+    } catch (e) {
+      state.weatherStatus[ccdesc] = { status: "geocode-error", detail: e.message };
+      return;
+    }
+    if (!location) {
+      state.weatherStatus[ccdesc] = { status: "no-location", detail: "No postcode set for this depot yet." };
+      return;
+    }
+    try {
+      const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${location.lat}&longitude=${location.lon}` +
         `&start_date=${startDate}&end_date=${endDate}` +
         `&daily=precipitation_sum,temperature_2m_min,temperature_2m_max&timezone=Europe%2FLondon`;
       const resp = await fetch(url);
-      if (!resp.ok) throw new Error("weather fetch failed: " + resp.status);
+      if (!resp.ok) throw new Error(`Open-Meteo returned HTTP ${resp.status}`);
       const json = await resp.json();
       const days = (json.daily && json.daily.time) || [];
+      if (days.length === 0) throw new Error("Open-Meteo returned no daily records for this date range");
       const monthly = {};
       days.forEach((dateStr, i) => {
         const ym = dateStr.slice(0, 7);
@@ -450,31 +507,13 @@ async function fetchWeatherForAllDepots() {
         if (tmax !== null && tmax !== undefined) { monthly[ym].tempSum += tmax; monthly[ym].tempCount += 1; }
       });
       Object.values(monthly).forEach(m => { m.meanTemp = m.tempCount ? m.tempSum / m.tempCount : null; });
-      state.weatherByDepot[depot.ccdesc] = monthly;
+      state.weatherByDepot[ccdesc] = monthly;
+      const where = location.postcode || `${location.lat.toFixed(3)}, ${location.lon.toFixed(3)}`;
+      state.weatherStatus[ccdesc] = { status: "ok", detail: `${days.length} day(s) of weather loaded for ${where}.`, location };
     } catch (e) {
-      state.weatherWarning = true;
+      state.weatherStatus[ccdesc] = { status: "fetch-error", detail: e.message, location };
     }
   }));
-
-  const warningPanel = document.getElementById("warningPanel");
-  if (state.weatherWarning) {
-    warningPanel.style.display = "block";
-    warningPanel.innerHTML = '<div class="warning-banner">Weather data could not be loaded for one or more depots ' +
-      '(no network access, an unrecognised depot location, or the weather API is unavailable). Usage anomaly detection ' +
-      'is unaffected — open a depot and set its location to enable the weather overlay.</div>';
-  } else {
-    warningPanel.style.display = "none";
-  }
-}
-
-function getDepotCoords(ccdesc) {
-  const override = localStorage.getItem(`depotCoords:${ccdesc}`);
-  if (override) { try { return JSON.parse(override); } catch (e) { /* ignore bad value */ } }
-  return DEPOT_COORDS[ccdesc] || null;
-}
-
-function setDepotCoords(ccdesc, lat, lon) {
-  localStorage.setItem(`depotCoords:${ccdesc}`, JSON.stringify({ lat, lon }));
 }
 
 /* ---------- 6. Rendering helpers ---------- */
@@ -494,6 +533,48 @@ function updateStatus() {
   const statusGroup = document.getElementById("statusGroup");
   const depotCount = Object.keys(state.depots).length;
   statusGroup.textContent = `${state.rows.length} rows · ${depotCount} depot(s) · ${state.months.length} month(s)`;
+}
+
+function weatherBadgeHtml(ccdesc) {
+  const s = state.weatherStatus[ccdesc];
+  if (!s || s.status === "pending") return '<span class="badge-navy">Weather: checking&hellip;</span>';
+  if (s.status === "ok") return '<span class="badge-green">Weather: OK</span>';
+  if (s.status === "no-location") return '<span class="badge-navy">Weather: no postcode</span>';
+  return '<span class="badge-red">Weather: error</span>';
+}
+
+function renderWeatherCoveragePanel() {
+  const body = document.getElementById("weatherCoverageBody");
+  const depotNames = Object.keys(state.depots);
+  if (depotNames.length === 0) { body.innerHTML = ""; return; }
+
+  const statusOf = name => (state.weatherStatus[name] || { status: "pending" }).status;
+  const ok = depotNames.filter(n => statusOf(n) === "ok");
+  const pending = depotNames.filter(n => statusOf(n) === "pending");
+  const noLocation = depotNames.filter(n => statusOf(n) === "no-location");
+  const errored = depotNames.filter(n => statusOf(n) === "geocode-error" || statusOf(n) === "fetch-error");
+
+  let html = `<div class="sub">${ok.length} of ${depotNames.length} depot(s) have weather data loaded` +
+    (pending.length ? ` (${pending.length} still checking&hellip;)` : "") + `.</div>`;
+
+  if (noLocation.length) {
+    html += `<div class="warning-banner">
+      <strong>${noLocation.length} depot(s) have no postcode set</strong> so no weather overlay is available for them.
+      Send me each depot's postcode (as it appears in <code>CCDesc</code>) and I'll hard-code it into the tool —
+      or open a depot below and set its postcode yourself.
+      <div style="margin-top:6px;font-family:monospace;font-size:11px;user-select:all;background:#fff;padding:6px;border-radius:4px;">${noLocation.map(escapeHtml).join(", ")}</div>
+    </div>`;
+  }
+  if (errored.length) {
+    html += `<div class="warning-banner" style="border-left:4px solid #e74c3c;background:rgba(231,76,60,0.1);color:#922b21;">
+      <strong>${errored.length} depot(s) had a weather lookup error</strong> (usage anomaly detection is unaffected):
+      <ul style="margin:6px 0 0 18px;padding:0;">${errored.map(n => `<li>${escapeHtml(n)}: ${escapeHtml(state.weatherStatus[n].detail)}</li>`).join("")}</ul>
+    </div>`;
+  }
+  if (ok.length === depotNames.length && depotNames.length > 0) {
+    html += `<div class="warning-banner" style="border-left:4px solid #27ae60;background:rgba(39,174,96,0.12);color:#1e7e45;">Weather data is loaded for all ${depotNames.length} depot(s).</div>`;
+  }
+  body.innerHTML = html;
 }
 
 function renderToCodeToggles() {
@@ -543,6 +624,7 @@ function renderDepotGrid() {
       <h3>${escapeHtml(depot.ccdesc)}</h3>
       ${topPartHtml}
       <div class="flag-count">${flagged.length} part(s) flagged &middot; ${escapeHtml(depot.opco)}</div>
+      <div style="margin-top:6px;">${weatherBadgeHtml(depot.ccdesc)}</div>
       <canvas id="${canvasId}" height="46"></canvas>
     `;
     card.addEventListener("click", () => renderDrilldown(depot.ccdesc));
@@ -578,14 +660,7 @@ function renderDrilldown(ccdesc) {
   document.getElementById("drilldownView").style.display = "block";
   document.getElementById("drilldownDepotName").textContent = ccdesc;
 
-  const coords = getDepotCoords(ccdesc);
-  let locHtml = "";
-  if (!coords) {
-    locHtml = `<div class="warning-banner">No location set for weather lookups on this depot.
-      <input type="text" id="latInput" class="location-input" placeholder="latitude">
-      <input type="text" id="lonInput" class="location-input" placeholder="longitude">
-      <button class="action-btn" id="saveLocBtn">Save location</button></div>`;
-  }
+  renderWeatherDepotPanel(ccdesc);
 
   const mtlEntries = Object.entries(depot.mtlGroups)
     .map(([name, g]) => ({ name, stats: g.stats }))
@@ -595,21 +670,42 @@ function renderDrilldown(ccdesc) {
   const mtlHtml = mtlEntries.length
     ? mtlEntries.map(g => `<div class="mtl-chip">${escapeHtml(g.name)} <span class="z">z=${g.stats.z.toFixed(1)}</span></div>`).join("")
     : '<div class="spinner-note">No category-level history long enough yet.</div>';
-  document.getElementById("mtlSummary").innerHTML = locHtml + mtlHtml;
-
-  const saveBtn = document.getElementById("saveLocBtn");
-  if (saveBtn) {
-    saveBtn.addEventListener("click", async () => {
-      const lat = parseFloat(document.getElementById("latInput").value);
-      const lon = parseFloat(document.getElementById("lonInput").value);
-      if (isNaN(lat) || isNaN(lon)) { alert("Enter valid latitude/longitude"); return; }
-      setDepotCoords(ccdesc, lat, lon);
-      await fetchWeatherForAllDepots();
-      renderDrilldown(ccdesc);
-    });
-  }
+  document.getElementById("mtlSummary").innerHTML = mtlHtml;
 
   renderPartsTable(depot);
+}
+
+function renderWeatherDepotPanel(ccdesc) {
+  const status = state.weatherStatus[ccdesc] || { status: "pending", detail: "Checking…" };
+  const currentPostcode = depotPostcodeOverride(ccdesc) ||
+    (DEPOT_LOCATIONS[ccdesc] && DEPOT_LOCATIONS[ccdesc].postcode) || "";
+
+  let statusLine;
+  if (status.status === "ok") statusLine = `<span class="badge-green">Weather OK</span> ${escapeHtml(status.detail)}`;
+  else if (status.status === "no-location") statusLine = `<span class="badge-navy">No location set</span> Enter this depot's postcode below to enable the weather overlay.`;
+  else if (status.status === "pending") statusLine = `<span class="badge-navy">Checking&hellip;</span>`;
+  else statusLine = `<span class="badge-red">Weather error</span> ${escapeHtml(status.detail)}`;
+
+  document.getElementById("weatherDepotBody").innerHTML = `
+    <div class="warning-banner" style="background:#fafaff;border-left:4px solid var(--accent);color:var(--text-primary);">
+      ${statusLine}
+      <div style="margin-top:8px;">
+        <input type="text" id="postcodeInput" class="location-input" placeholder="e.g. S2 3GA" value="${escapeHtml(currentPostcode)}">
+        <button class="action-btn" id="savePostcodeBtn">Save postcode</button>
+      </div>
+    </div>`;
+
+  document.getElementById("savePostcodeBtn").addEventListener("click", async () => {
+    const val = document.getElementById("postcodeInput").value.trim();
+    if (!val) { alert("Enter a postcode"); return; }
+    setDepotPostcode(ccdesc, val);
+    state.weatherStatus[ccdesc] = { status: "pending", detail: "Checking…" };
+    renderWeatherDepotPanel(ccdesc);
+    await fetchWeatherForAllDepots();
+    renderWeatherCoveragePanel();
+    renderDepotGrid();
+    renderWeatherDepotPanel(ccdesc);
+  });
 }
 
 function renderPartsTable(depot) {
