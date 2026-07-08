@@ -470,8 +470,25 @@ async function fetchWeatherForAllDepots() {
   const [sy, sm] = state.months[0].split("-").map(Number);
   const [ey, em] = state.months[state.months.length - 1].split("-").map(Number);
   const startDate = `${sy}-${String(sm).padStart(2, "0")}-01`;
-  const lastDay = new Date(ey, em, 0).getDate();
-  const endDate = `${ey}-${String(em).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+
+  // Open-Meteo's archive API only has historical data up to ~yesterday. If the data's
+  // final month is still in progress, requesting its calendar-end date is a future date
+  // and the API rejects the whole call with HTTP 400 — cap it instead of asking for it.
+  const lastDayOfMonth = new Date(ey, em, 0);
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const cappedEnd = lastDayOfMonth < yesterday ? lastDayOfMonth : yesterday;
+  const endDate = cappedEnd.toISOString().slice(0, 10);
+
+  if (endDate < startDate) {
+    depotEntries.forEach(depot => {
+      state.weatherStatus[depot.ccdesc] = {
+        status: "fetch-error",
+        detail: "This data is too recent — historical weather isn't published yet for these dates.",
+      };
+    });
+    return;
+  }
 
   await Promise.all(depotEntries.map(async depot => {
     const ccdesc = depot.ccdesc;
