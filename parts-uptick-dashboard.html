@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parts Uptick &amp; Weather Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg-page:       #f5f5f7;
+  --bg-header:     #2D2A6E;
+  --bg-panel:      #ffffff;
+  --accent:        #E5007D;
+  --accent-hover:  #C0006A;
+  --row-red:       rgba(231,76,60,0.12);
+  --row-amber:     rgba(243,156,18,0.15);
+  --row-green:     rgba(39,174,96,0.15);
+  --text-primary:  #2D2A6E;
+  --text-secondary:#6b6b8a;
+  --text-on-dark:  #ffffff;
+  --border:        #e0e0ec;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-primary);
+}
+header {
+  background: var(--bg-header);
+  color: var(--text-on-dark);
+  padding: 0 20px;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+header h1 { font-size: 17px; margin: 0; }
+header .tagline { font-size: 10px; opacity: 0.55; letter-spacing: 0.05em; margin-top: 2px; }
+header .controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 10px 0; }
+header .control-group { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+header .control-group label { opacity: 0.85; white-space: nowrap; }
+header input[type="range"] { width: 110px; }
+
+.upload-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.upload-btn:hover { background: var(--accent-hover); }
+.upload-btn input[type="file"] { display: none; }
+
+.toggle-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.6);
+  color: #fff;
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.toggle-btn:hover  { background: rgba(255,255,255,0.12); }
+.toggle-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.action-btn {
+  background: #27ae60;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.action-btn:hover { background: #219a52; }
+
+main { padding: 18px 22px 60px; max-width: 1400px; margin: 0 auto; }
+
+.empty-state {
+  background: var(--bg-panel);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.empty-state h2 { color: var(--text-primary); margin-top: 0; }
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+}
+.panel h2 { font-size: 15px; margin: 0 0 12px 0; color: var(--text-primary); }
+.panel .sub { font-size: 12px; color: var(--text-secondary); margin: -8px 0 12px 0; }
+
+.warning-banner {
+  background: var(--row-amber);
+  border: 1px solid #e67e22;
+  color: #8a5a10;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+
+.breadcrumb { font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; }
+.breadcrumb a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.breadcrumb a:hover { text-decoration: underline; }
+
+.depot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.depot-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: box-shadow 0.15s, transform 0.1s;
+}
+.depot-card:hover { box-shadow: 0 4px 14px rgba(45,42,110,0.12); transform: translateY(-1px); }
+.depot-card .rank { font-size: 11px; color: var(--text-secondary); }
+.depot-card h3 { margin: 2px 0 8px 0; font-size: 15px; }
+.depot-card .top-part { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
+.depot-card .top-part .z { color: var(--accent); font-weight: 600; }
+.depot-card .flag-count { font-size: 11px; color: var(--text-secondary); }
+.depot-card canvas { margin-top: 8px; max-height: 46px; }
+.depot-card.no-flags { border-left-color: #27ae60; opacity: 0.75; }
+
+.wo-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.wo-table th {
+  background: var(--bg-header);
+  color: var(--text-on-dark);
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.wo-table td { padding: 7px 10px; border-bottom: 1px solid #eaecef; }
+.wo-table tbody tr { cursor: pointer; }
+.wo-table tbody tr:hover td { filter: brightness(0.96); }
+.wo-table tr.expanded td { background: #fafaff; }
+
+.badge-navy { background: #2D2A6E; color: #fff; border-radius: 3px; padding: 1px 6px; font-size: 11px; }
+.badge-red  { background: #e74c3c; color: #fff; border-radius: 3px; padding: 1px 6px; font-size: 11px; }
+.badge-green { background: #27ae60; color: #fff; border-radius: 3px; padding: 1px 6px; font-size: 11px; }
+.z-strong { color: #c0392b; font-weight: 700; }
+.z-mild { color: #e67e22; font-weight: 600; }
+
+.drilldown-row td { padding: 0; }
+.drilldown-inner { padding: 14px 16px; background: #fafaff; border-bottom: 1px solid #eaecef; }
+.chart-wrap { position: relative; height: 220px; }
+.location-input { font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; width: 130px; }
+
+.mtl-summary { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.mtl-chip {
+  background: var(--row-amber);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.mtl-chip .z { font-weight: 700; color: #8a5a10; }
+
+.spinner-note { font-size: 12px; color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Parts Uptick &amp; Weather Dashboard</h1>
+    <div class="tagline">Designed by First Bus Franchise · Engineering</div>
+  </div>
+  <div class="controls">
+    <label class="upload-btn">
+      Upload GL Flex CSV
+      <input type="file" id="csvInput" accept=".csv">
+    </label>
+    <div class="control-group">
+      <label for="zThreshold">Sensitivity (z ≥ <span id="zThresholdVal">2.0</span>)</label>
+      <input type="range" id="zThreshold" min="1" max="4" step="0.1" value="2.0">
+    </div>
+    <div class="control-group" id="toCodeFilterGroup" style="display:none;">
+      <label>ToCode:</label>
+      <span id="toCodeToggles"></span>
+    </div>
+    <div class="control-group" id="statusGroup"></div>
+  </div>
+</header>
+
+<main id="app">
+  <div class="empty-state" id="emptyState">
+    <h2>No data loaded yet</h2>
+    <p>Upload a GL Flex export (CSV) above to detect part-usage upticks per depot.<br>
+    Expected columns include <code>PostingDate, CostCentre, CCDesc, Part, PartDesc, TransactionQty, ToCode, MtlGroupDesc</code>.</p>
+    <p class="spinner-note">Try the bundled <code>sample-gl-flex-data.csv</code> to see it in action.</p>
+  </div>
+
+  <div id="dashboardView" style="display:none;">
+    <div class="panel" id="warningPanel" style="display:none;"></div>
+
+    <div class="panel">
+      <h2>Depots ranked by biggest swing</h2>
+      <div class="sub">Sorted by each depot's single largest anomaly (z-score). Click a depot to drill in.</div>
+      <div class="depot-grid" id="depotGrid"></div>
+    </div>
+  </div>
+
+  <div id="drilldownView" style="display:none;">
+    <div class="breadcrumb"><a id="backToDepots">&larr; All depots</a> / <span id="drilldownDepotName"></span></div>
+
+    <div class="panel" id="mtlPanel">
+      <h2>Category-level swings (MtlGroup)</h2>
+      <div class="mtl-summary" id="mtlSummary"></div>
+    </div>
+
+    <div class="panel">
+      <h2 id="drilldownPartsTitle">Parts ranked by anomaly</h2>
+      <div class="sub">Click a row to see the monthly trend, mean band, and weather overlay.</div>
+      <table class="wo-table" id="partsTable">
+        <thead>
+          <tr>
+            <th>Part</th>
+            <th>Description</th>
+            <th>Latest month qty</th>
+            <th>Historical mean</th>
+            <th>Z-score</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="partsTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+<script>
+/* ---------- 1. Config ---------- */
+const DEPOT_COORDS = {
+  "Olive Grove ENG": { lat: 53.3617, lon: -1.4557 },   // Sheffield
+  "Blantyre ENG":    { lat: 55.8000, lon: -4.0833 },   // Blantyre / Glasgow
+};
+
+const state = {
+  rows: [],
+  toCodes: [],
+  selectedToCodes: new Set(),
+  zThreshold: 2.0,
+  depots: {},          // ccKey -> { ccdesc, costCentre, opco, series: { partKey: {...} }, mtlSeries: {...} }
+  months: [],          // sorted array of "YYYY-MM" strings across whole dataset
+  weatherByDepot: {},  // ccKey -> { "YYYY-MM": { rain, frostDays, meanTemp } }
+  weatherWarning: false,
+  currentDepotKey: null,
+};
+
+function monthKey(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); }
+function monthLabel(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("en-GB", { month: "short", year: "2-digit" });
+}
+function parseUkDate(s) {
+  // PostingDate format DD/MM/YYYY
+  const parts = s.split("/");
+  if (parts.length !== 3) return null;
+  const [dd, mm, yyyy] = parts.map(Number);
+  if (!dd || !mm || !yyyy) return null;
+  return new Date(yyyy, mm - 1, dd);
+}
+
+/* ---------- 2. CSV upload & parsing ---------- */
+document.getElementById("csvInput").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    complete: (results) => {
+      state.rows = results.data;
+      processData();
+    },
+    error: (err) => {
+      alert("Failed to parse CSV: " + err.message);
+    },
+  });
+});
+
+/* ---------- 3. Data processing ---------- */
+function processData() {
+  const usageRows = state.rows.filter(r => (r.TransactionType || "").trim() === "I");
+
+  const toCodeSet = new Set();
+  usageRows.forEach(r => { if (r.ToCode) toCodeSet.add(r.ToCode.trim()); });
+  state.toCodes = Array.from(toCodeSet).sort();
+  if (state.selectedToCodes.size === 0) state.selectedToCodes = new Set(state.toCodes);
+
+  renderToCodeToggles();
+  rebuildDepots();
+}
+
+function rebuildDepots() {
+  const filtered = state.rows.filter(r => {
+    if ((r.TransactionType || "").trim() !== "I") return false;
+    const tc = (r.ToCode || "").trim();
+    return state.selectedToCodes.has(tc);
+  });
+
+  const depots = {};
+  const monthSet = new Set();
+
+  filtered.forEach(r => {
+    const ccdesc = (r.CCDesc || "").trim() || (r.CostCentre || "").trim() || "Unknown Depot";
+    const date = parseUkDate((r.PostingDate || "").trim());
+    if (!date) return;
+    const ym = monthKey(date);
+    monthSet.add(ym);
+
+    if (!depots[ccdesc]) {
+      depots[ccdesc] = {
+        ccdesc,
+        costCentre: (r.CostCentre || "").trim(),
+        opco: (r.OPCODesc || "").trim(),
+        parts: {},   // partCode -> { desc, mtlGroup, mtlGroupDesc, monthly: {ym: qty} }
+        mtlGroups: {}, // mtlGroupDesc -> { monthly: {ym: qty} }
+      };
+    }
+    const depot = depots[ccdesc];
+    const partCode = (r.Part || "").trim();
+    const qty = parseFloat(r.TransactionQty) || 0;
+    const mtlGroupDesc = (r.MtlGroupDesc || "").trim() || "Uncategorised";
+
+    if (partCode) {
+      if (!depot.parts[partCode]) {
+        depot.parts[partCode] = {
+          desc: (r.PartDesc || "").trim() || partCode,
+          mtlGroupDesc,
+          monthly: {},
+        };
+      }
+      const p = depot.parts[partCode];
+      p.monthly[ym] = (p.monthly[ym] || 0) + qty;
+    }
+
+    if (!depot.mtlGroups[mtlGroupDesc]) depot.mtlGroups[mtlGroupDesc] = { monthly: {} };
+    depot.mtlGroups[mtlGroupDesc].monthly[ym] = (depot.mtlGroups[mtlGroupDesc].monthly[ym] || 0) + qty;
+  });
+
+  state.months = Array.from(monthSet).sort();
+  state.depots = depots;
+
+  computeAllAnomalies();
+  fetchWeatherForAllDepots().finally(() => {
+    renderDepotGrid();
+    if (state.currentDepotKey && state.depots[state.currentDepotKey]) renderDrilldown(state.currentDepotKey);
+  });
+  renderDepotGrid();
+  document.getElementById("emptyState").style.display = "none";
+  document.getElementById("dashboardView").style.display = "block";
+}
+
+/* ---------- 4. Anomaly detection (z-score) ---------- */
+function seriesArray(monthlyObj) {
+  return state.months.map(ym => monthlyObj[ym] || 0);
+}
+
+function computeZ(seriesVals) {
+  if (seriesVals.length < 5) return { z: null, mean: null, std: null, latest: seriesVals[seriesVals.length - 1] ?? 0, insufficient: true };
+  const latest = seriesVals[seriesVals.length - 1];
+  const history = seriesVals.slice(0, -1);
+  const nonZeroCount = history.filter(v => v > 0).length;
+  if (nonZeroCount < 4) return { z: null, mean: null, std: null, latest, insufficient: true };
+  const mean = history.reduce((a, b) => a + b, 0) / history.length;
+  const variance = history.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / history.length;
+  const std = Math.sqrt(variance);
+  let z;
+  if (std === 0) {
+    z = latest > mean ? 99 : 0;
+  } else {
+    z = (latest - mean) / std;
+  }
+  return { z, mean, std, latest, insufficient: false };
+}
+
+function computeAllAnomalies() {
+  Object.values(state.depots).forEach(depot => {
+    Object.entries(depot.parts).forEach(([partCode, p]) => {
+      p.stats = computeZ(seriesArray(p.monthly));
+    });
+    Object.entries(depot.mtlGroups).forEach(([name, g]) => {
+      g.stats = computeZ(seriesArray(g.monthly));
+    });
+  });
+}
+
+function flaggedParts(depot) {
+  return Object.entries(depot.parts)
+    .map(([code, p]) => ({ code, ...p }))
+    .filter(p => p.stats && !p.stats.insufficient && p.stats.z >= state.zThreshold)
+    .sort((a, b) => b.stats.z - a.stats.z);
+}
+
+function allPartsRanked(depot) {
+  return Object.entries(depot.parts)
+    .map(([code, p]) => ({ code, ...p }))
+    .sort((a, b) => {
+      const za = (a.stats && !a.stats.insufficient) ? a.stats.z : -Infinity;
+      const zb = (b.stats && !b.stats.insufficient) ? b.stats.z : -Infinity;
+      return zb - za;
+    });
+}
+
+/* ---------- 5. Weather (Open-Meteo) ---------- */
+async function fetchWeatherForAllDepots() {
+  state.weatherWarning = false;
+  const depotEntries = Object.values(state.depots);
+  if (state.months.length === 0) return;
+  const [sy, sm] = state.months[0].split("-").map(Number);
+  const [ey, em] = state.months[state.months.length - 1].split("-").map(Number);
+  const startDate = `${sy}-${String(sm).padStart(2, "0")}-01`;
+  const lastDay = new Date(ey, em, 0).getDate();
+  const endDate = `${ey}-${String(em).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+
+  await Promise.all(depotEntries.map(async depot => {
+    const coords = getDepotCoords(depot.ccdesc);
+    if (!coords) { state.weatherWarning = true; return; }
+    try {
+      const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${coords.lat}&longitude=${coords.lon}` +
+        `&start_date=${startDate}&end_date=${endDate}` +
+        `&daily=precipitation_sum,temperature_2m_min,temperature_2m_max&timezone=Europe%2FLondon`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("weather fetch failed: " + resp.status);
+      const json = await resp.json();
+      const days = (json.daily && json.daily.time) || [];
+      const monthly = {};
+      days.forEach((dateStr, i) => {
+        const ym = dateStr.slice(0, 7);
+        if (!monthly[ym]) monthly[ym] = { rain: 0, frostDays: 0, tempSum: 0, tempCount: 0 };
+        const rain = json.daily.precipitation_sum[i] || 0;
+        const tmin = json.daily.temperature_2m_min[i];
+        const tmax = json.daily.temperature_2m_max[i];
+        monthly[ym].rain += rain;
+        if (tmin !== null && tmin !== undefined && tmin < 0) monthly[ym].frostDays += 1;
+        if (tmax !== null && tmax !== undefined) { monthly[ym].tempSum += tmax; monthly[ym].tempCount += 1; }
+      });
+      Object.values(monthly).forEach(m => { m.meanTemp = m.tempCount ? m.tempSum / m.tempCount : null; });
+      state.weatherByDepot[depot.ccdesc] = monthly;
+    } catch (e) {
+      state.weatherWarning = true;
+    }
+  }));
+
+  const warningPanel = document.getElementById("warningPanel");
+  if (state.weatherWarning) {
+    warningPanel.style.display = "block";
+    warningPanel.innerHTML = '<div class="warning-banner">Weather data could not be loaded for one or more depots ' +
+      '(no network access, an unrecognised depot location, or the weather API is unavailable). Usage anomaly detection ' +
+      'is unaffected — open a depot and set its location to enable the weather overlay.</div>';
+  } else {
+    warningPanel.style.display = "none";
+  }
+}
+
+function getDepotCoords(ccdesc) {
+  const override = localStorage.getItem(`depotCoords:${ccdesc}`);
+  if (override) { try { return JSON.parse(override); } catch (e) { /* ignore bad value */ } }
+  return DEPOT_COORDS[ccdesc] || null;
+}
+
+function setDepotCoords(ccdesc, lat, lon) {
+  localStorage.setItem(`depotCoords:${ccdesc}`, JSON.stringify({ lat, lon }));
+}
+
+/* ---------- 6. Rendering helpers ---------- */
+const chartRegistry = {};
+function makeOrUpdateChart(canvasId, config) {
+  if (chartRegistry[canvasId]) chartRegistry[canvasId].destroy();
+  const ctx = document.getElementById(canvasId);
+  if (!ctx) return;
+  chartRegistry[canvasId] = new Chart(ctx, config);
+}
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function cssSafe(str) { return String(str).replace(/[^a-zA-Z0-9_-]/g, "_"); }
+
+function updateStatus() {
+  const statusGroup = document.getElementById("statusGroup");
+  const depotCount = Object.keys(state.depots).length;
+  statusGroup.textContent = `${state.rows.length} rows · ${depotCount} depot(s) · ${state.months.length} month(s)`;
+}
+
+function renderToCodeToggles() {
+  const group = document.getElementById("toCodeFilterGroup");
+  const container = document.getElementById("toCodeToggles");
+  if (state.toCodes.length <= 1) { group.style.display = "none"; return; }
+  group.style.display = "flex";
+  container.innerHTML = "";
+  state.toCodes.forEach(tc => {
+    const btn = document.createElement("button");
+    btn.className = "toggle-btn" + (state.selectedToCodes.has(tc) ? " active" : "");
+    btn.textContent = tc;
+    btn.style.marginLeft = "4px";
+    btn.addEventListener("click", () => {
+      if (state.selectedToCodes.has(tc)) state.selectedToCodes.delete(tc);
+      else state.selectedToCodes.add(tc);
+      rebuildDepots();
+    });
+    container.appendChild(btn);
+  });
+}
+
+/* ---------- 7. Depot ranking view ---------- */
+function renderDepotGrid() {
+  updateStatus();
+  const grid = document.getElementById("depotGrid");
+  grid.innerHTML = "";
+
+  const depotList = Object.values(state.depots).map(d => {
+    const flagged = flaggedParts(d);
+    const topZ = flagged.length ? flagged[0].stats.z : -Infinity;
+    return { depot: d, flagged, topZ };
+  });
+  depotList.sort((a, b) => b.topZ - a.topZ);
+
+  depotList.forEach((entry, idx) => {
+    const { depot, flagged } = entry;
+    const card = document.createElement("div");
+    card.className = "depot-card" + (flagged.length === 0 ? " no-flags" : "");
+    const rankLabel = flagged.length ? `#${idx + 1} biggest swing` : "No anomalies flagged";
+    const topPartHtml = flagged.length
+      ? `<div class="top-part">${escapeHtml(flagged[0].desc)} <span class="z">z=${flagged[0].stats.z.toFixed(1)}</span></div>`
+      : `<div class="top-part" style="color:var(--text-secondary)">Usage within normal range</div>`;
+    const canvasId = `spark-${cssSafe(depot.ccdesc)}`;
+    card.innerHTML = `
+      <div class="rank">${rankLabel}</div>
+      <h3>${escapeHtml(depot.ccdesc)}</h3>
+      ${topPartHtml}
+      <div class="flag-count">${flagged.length} part(s) flagged &middot; ${escapeHtml(depot.opco)}</div>
+      <canvas id="${canvasId}" height="46"></canvas>
+    `;
+    card.addEventListener("click", () => renderDrilldown(depot.ccdesc));
+    grid.appendChild(card);
+  });
+
+  depotList.forEach(entry => {
+    const topPart = entry.flagged[0] || allPartsRanked(entry.depot)[0];
+    if (!topPart) return;
+    const canvasId = `spark-${cssSafe(entry.depot.ccdesc)}`;
+    if (!document.getElementById(canvasId)) return;
+    makeOrUpdateChart(canvasId, {
+      type: "line",
+      data: { labels: state.months, datasets: [{
+        data: seriesArray(topPart.monthly), borderColor: "#E5007D",
+        backgroundColor: "rgba(229,0,125,0.08)", fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2,
+      }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: { x: { display: false }, y: { display: false } },
+      },
+    });
+  });
+}
+
+/* ---------- 8. Depot drill-down view ---------- */
+function renderDrilldown(ccdesc) {
+  state.currentDepotKey = ccdesc;
+  const depot = state.depots[ccdesc];
+  if (!depot) return;
+  document.getElementById("dashboardView").style.display = "none";
+  document.getElementById("drilldownView").style.display = "block";
+  document.getElementById("drilldownDepotName").textContent = ccdesc;
+
+  const coords = getDepotCoords(ccdesc);
+  let locHtml = "";
+  if (!coords) {
+    locHtml = `<div class="warning-banner">No location set for weather lookups on this depot.
+      <input type="text" id="latInput" class="location-input" placeholder="latitude">
+      <input type="text" id="lonInput" class="location-input" placeholder="longitude">
+      <button class="action-btn" id="saveLocBtn">Save location</button></div>`;
+  }
+
+  const mtlEntries = Object.entries(depot.mtlGroups)
+    .map(([name, g]) => ({ name, stats: g.stats }))
+    .filter(g => g.stats && !g.stats.insufficient)
+    .sort((a, b) => b.stats.z - a.stats.z)
+    .slice(0, 8);
+  const mtlHtml = mtlEntries.length
+    ? mtlEntries.map(g => `<div class="mtl-chip">${escapeHtml(g.name)} <span class="z">z=${g.stats.z.toFixed(1)}</span></div>`).join("")
+    : '<div class="spinner-note">No category-level history long enough yet.</div>';
+  document.getElementById("mtlSummary").innerHTML = locHtml + mtlHtml;
+
+  const saveBtn = document.getElementById("saveLocBtn");
+  if (saveBtn) {
+    saveBtn.addEventListener("click", async () => {
+      const lat = parseFloat(document.getElementById("latInput").value);
+      const lon = parseFloat(document.getElementById("lonInput").value);
+      if (isNaN(lat) || isNaN(lon)) { alert("Enter valid latitude/longitude"); return; }
+      setDepotCoords(ccdesc, lat, lon);
+      await fetchWeatherForAllDepots();
+      renderDrilldown(ccdesc);
+    });
+  }
+
+  renderPartsTable(depot);
+}
+
+function renderPartsTable(depot) {
+  const tbody = document.getElementById("partsTableBody");
+  tbody.innerHTML = "";
+  const parts = allPartsRanked(depot);
+
+  parts.forEach(p => {
+    const tr = document.createElement("tr");
+    const stats = p.stats;
+    let statusBadge, zCell, meanCell;
+    if (!stats || stats.insufficient) {
+      statusBadge = '<span class="badge-navy">Insufficient history</span>';
+      zCell = "&mdash;"; meanCell = "&mdash;";
+    } else if (stats.z >= state.zThreshold) {
+      statusBadge = '<span class="badge-red">Uptick flagged</span>';
+      zCell = `<span class="z-strong">${stats.z.toFixed(1)}</span>`;
+      meanCell = stats.mean.toFixed(1);
+    } else {
+      statusBadge = '<span class="badge-green">Normal</span>';
+      zCell = stats.z >= state.zThreshold * 0.5 ? `<span class="z-mild">${stats.z.toFixed(1)}</span>` : stats.z.toFixed(1);
+      meanCell = stats.mean.toFixed(1);
+    }
+    const latest = stats ? stats.latest : 0;
+    tr.innerHTML = `
+      <td>${escapeHtml(p.code)}</td>
+      <td>${escapeHtml(p.desc)}</td>
+      <td>${latest}</td>
+      <td>${meanCell}</td>
+      <td>${zCell}</td>
+      <td>${statusBadge}</td>
+    `;
+    tr.addEventListener("click", () => toggleDrilldownRow(tr, depot, p));
+    tbody.appendChild(tr);
+  });
+}
+
+function toggleDrilldownRow(tr, depot, part) {
+  const existing = tr.nextElementSibling;
+  if (existing && existing.classList.contains("drilldown-row")) {
+    existing.remove();
+    tr.classList.remove("expanded");
+    return;
+  }
+  document.querySelectorAll("#partsTableBody tr.drilldown-row").forEach(r => r.remove());
+  document.querySelectorAll("#partsTableBody tr.expanded").forEach(r => r.classList.remove("expanded"));
+  tr.classList.add("expanded");
+
+  const row = document.createElement("tr");
+  row.className = "drilldown-row";
+  const canvasId = `chart-${cssSafe(depot.ccdesc)}-${cssSafe(part.code)}`;
+  row.innerHTML = `<td colspan="6"><div class="drilldown-inner"><div class="chart-wrap"><canvas id="${canvasId}"></canvas></div></div></td>`;
+  tr.after(row);
+
+  const qtySeries = seriesArray(part.monthly);
+  const stats = part.stats;
+  const meanLine = state.months.map(() => (stats && !stats.insufficient) ? stats.mean : null);
+  const upperBand = state.months.map(() => (stats && !stats.insufficient) ? stats.mean + stats.std : null);
+  const lowerBand = state.months.map(() => (stats && !stats.insufficient) ? Math.max(0, stats.mean - stats.std) : null);
+
+  const weather = state.weatherByDepot[depot.ccdesc] || {};
+  const rainSeries = state.months.map(ym => (weather[ym] ? weather[ym].rain : null));
+  const hasWeather = rainSeries.some(v => v !== null);
+
+  const datasets = [
+    { label: "Mean +1σ", data: upperBand, borderColor: "transparent", backgroundColor: "rgba(229,0,125,0.10)", fill: "+1", pointRadius: 0 },
+    { label: "Mean -1σ", data: lowerBand, borderColor: "transparent", backgroundColor: "rgba(229,0,125,0.10)", fill: false, pointRadius: 0 },
+    { label: "Historical mean", data: meanLine, borderColor: "#6b6b8a", borderDash: [4, 4], pointRadius: 0, borderWidth: 1.5 },
+    { label: "Monthly usage", data: qtySeries, borderColor: "#2D2A6E", backgroundColor: "#2D2A6E", pointRadius: 3, borderWidth: 2, tension: 0.2 },
+  ];
+  if (hasWeather) {
+    datasets.push({ label: "Rainfall (mm)", data: rainSeries, type: "bar", backgroundColor: "rgba(52,152,219,0.35)", yAxisID: "y1" });
+  }
+
+  makeOrUpdateChart(canvasId, {
+    type: "line",
+    data: { labels: state.months.map(monthLabel), datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 10 } } } },
+      scales: {
+        y: { beginAtZero: true, title: { display: true, text: "Qty issued" } },
+        y1: hasWeather
+          ? { position: "right", beginAtZero: true, grid: { drawOnChartArea: false }, title: { display: true, text: "Rainfall (mm)" } }
+          : { display: false },
+      },
+    },
+  });
+}
+
+/* ---------- 9. Global controls & init ---------- */
+document.getElementById("zThreshold").addEventListener("input", (e) => {
+  state.zThreshold = parseFloat(e.target.value);
+  document.getElementById("zThresholdVal").textContent = state.zThreshold.toFixed(1);
+  if (Object.keys(state.depots).length) {
+    renderDepotGrid();
+    if (state.currentDepotKey) renderDrilldown(state.currentDepotKey);
+  }
+});
+
+document.getElementById("backToDepots").addEventListener("click", () => {
+  document.getElementById("drilldownView").style.display = "none";
+  document.getElementById("dashboardView").style.display = "block";
+  state.currentDepotKey = null;
+});
+</script>
+</body>
+</html>
